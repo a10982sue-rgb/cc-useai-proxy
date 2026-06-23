@@ -1,0 +1,8 @@
+# Runtime / test artifacts — never push these.
+proxy.log
+_emutest.json
+node_modules/
+package-lock.json
+*.log
+.env
+.env.*

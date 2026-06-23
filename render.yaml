@@ -1,0 +1,22 @@
+# Render Blueprint — deploys cc-useai-proxy as a public web service.
+# Free tier: spins down after ~15 min idle, cold-starts on next request.
+# Render injects PORT automatically; the proxy reads it from env.
+services:
+  - type: web
+    name: cc-useai-proxy
+    runtime: node
+    plan: free
+    buildCommand: ""
+    startCommand: node proxy.js
+    healthCheckPath: /health
+    envVars:
+      - key: USEAI_BASE_URL
+        value: https://api.iamhc.cn
+      - key: USEAI_FALLBACK_URL
+        value: https://api.hcnsec.cn
+      - key: USEAI_MODEL
+        value: glm-5.2
+      - key: USEAI_BIG_MODEL
+        value: claude-opus-4-8
+      - key: USEAI_SMALL_MODEL
+        value: gpt-5-mini

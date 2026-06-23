@@ -1,0 +1,14 @@
+{
+  "name": "cc-useai-proxy",
+  "version": "2.0.0",
+  "description": "Anthropic Messages API <-> OpenAI chat-completions translation proxy with GLM 5.2, grading, and Render deployment.",
+  "main": "proxy.js",
+  "private": true,
+  "scripts": {
+    "start": "node proxy.js",
+    "dev": "node proxy.js"
+  },
+  "keywords": ["proxy", "anthropic", "openai", "claude-code", "glm"],
+  "author": "",
+  "license": "ISC"
+}
