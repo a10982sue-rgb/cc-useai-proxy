@@ -42,10 +42,10 @@ const UPSTREAM_FALLBACK = process.env.USEAI_FALLBACK_URL || 'https://api.hcnsec.
 const UPSTREAM_PATH     = '/v1/chat/completions';
 const API_KEY           = process.env.USEAI_API_KEY || 'sk-h8bKEIBwADUKIsLGpuYdDeJ2xVHieyseiLoOGXDetJMv0lg1';
 
-// Model mapping
+// Model mapping — all route to glm-5.2 (only model available on upstream)
 const DEFAULT_MODEL = process.env.USEAI_MODEL      || 'glm-5.2';
-const BIG_MODEL     = process.env.USEAI_BIG_MODEL   || 'claude-opus-4-8';
-const SMALL_MODEL   = process.env.USEAI_SMALL_MODEL  || 'gpt-5-mini';
+const BIG_MODEL     = process.env.USEAI_BIG_MODEL   || 'glm-5.2';
+const SMALL_MODEL   = process.env.USEAI_SMALL_MODEL  || 'glm-5.2';
 const GLM_MODEL     = process.env.USEAI_GLM_MODEL   || 'glm-5.2';
 
 // Chars-per-token divisor for count_tokens estimate
@@ -581,10 +581,7 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({
       object: 'list',
       data: [
-        { id: 'glm-5.2',          object: 'model', created: 1719000000, owned_by: 'zhipu' },
-        { id: 'claude-opus-4-8',   object: 'model', created: 1719000000, owned_by: 'anthropic' },
-        { id: 'claude-sonnet-4-6', object: 'model', created: 1719000000, owned_by: 'anthropic' },
-        { id: 'gpt-5-mini',        object: 'model', created: 1719000000, owned_by: 'openai' },
+        { id: 'glm-5.2', object: 'model', created: 1719000000, owned_by: 'zhipu' },
       ],
     }));
     return;
