@@ -118,6 +118,8 @@
     .msg.assistant .msg-avatar { background: var(--bg-elevated); color: var(--accent-light); border: 1px solid var(--border); }
 
     .msg-body { flex: 1; min-width: 0; overflow-wrap: break-word; }
+    .msg-name { font-size: 11px; font-family: 'JetBrains Mono', monospace; color: var(--accent-light); margin-bottom: 3px; letter-spacing: .02em; }
+    .msg.user .msg-name { color: var(--text-muted); }
     .msg-body pre { background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin: 10px 0; overflow-x: auto; font-family: 'JetBrains Mono', monospace; font-size: 12.5px; line-height: 1.6; }
     .msg-body code { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; background: var(--bg-primary); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border); }
     .msg-body pre code { background: none; border: none; padding: 0; }
@@ -419,13 +421,17 @@
       function setBusy(b) { busy = b; btnSend.disabled = b; input.disabled = b; if (!b) input.focus(); }
       function scrollBottom() { chatContainer.scrollTop = chatContainer.scrollHeight; }
 
-      function addMsg(role) {
+      function addMsg(role, name) {
         welcome.style.display = 'none';
         const div = document.createElement('div');
         div.className = 'msg ' + role;
         const avatar = document.createElement('div'); avatar.className = 'msg-avatar'; avatar.textContent = role === 'user' ? 'Y' : 'G';
-        const body = document.createElement('div'); body.className = 'msg-body';
-        div.appendChild(avatar); div.appendChild(body);
+        const bodyWrap = document.createElement('div'); bodyWrap.className = 'msg-body';
+        if (name) {
+          const nm = document.createElement('div'); nm.className = 'msg-name'; nm.textContent = name; bodyWrap.appendChild(nm);
+        }
+        const body = document.createElement('div'); body.className = 'msg-text'; bodyWrap.appendChild(body);
+        div.appendChild(avatar); div.appendChild(bodyWrap);
         messagesEl.appendChild(div); scrollBottom();
         return body;
       }
@@ -456,6 +462,7 @@
         history.push({ role: 'user', content: text });
         const aBody = addMsg('assistant');
         aBody.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+        let label = 'glm-5.2';
         setBusy(true); abortCtrl = new AbortController();
         try {
           const res = await fetch(cfg.base + '/v1/messages', {
@@ -478,6 +485,10 @@
               const data = trimmed.slice(5).trim();
               if (data === '[DONE]') continue;
               let evt; try { evt = JSON.parse(data); } catch { continue; }
+              if (evt.type === 'message_start' && evt.message && evt.message.model) {
+                label = evt.message.model;
+                const nm = aBody.parentElement.querySelector('.msg-name'); if (nm) nm.textContent = label;
+              }
               if (evt.type === 'content_block_delta') {
                 const d = evt.delta;
                 if (d.type === 'text_delta' && d.text) {

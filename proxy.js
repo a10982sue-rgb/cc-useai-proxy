@@ -458,7 +458,7 @@ function anthropicToOpenAI(body) {
 // ═══════════════════════════════════════════════════════════════════
 //  OPENAI -> ANTHROPIC RESPONSE TRANSLATION
 // ═══════════════════════════════════════════════════════════════════
-function openAIToAnthropic(oaiResp, requestModel) {
+function openAIToAnthropic(oaiResp, requestModel, actualModel) {
   const choice = (oaiResp.choices || [])[0] || {};
   const msg = choice.message || {};
   const rawText = msg.content || '';
@@ -482,7 +482,12 @@ function openAIToAnthropic(oaiResp, requestModel) {
     id: msgId(),
     type: 'message',
     role: 'assistant',
-    model: requestModel || 'glm-5.2',
+    // Echo the actual upstream model if the provider returned one; otherwise
+    // fall back to the mapped model the proxy sent (actualModel), then the
+    // inbound request model. So clients see the *real* model that answered.
+    model: (oaiResp.model && typeof oaiResp.model === 'string' && oaiResp.model.trim())
+      ? oaiResp.model.trim()
+      : (actualModel || requestModel || 'glm-5.2'),
     content: contentBlocks,
     stop_reason: stopReason,
     stop_sequence: null,
@@ -1168,7 +1173,7 @@ const server = http.createServer(async (req, res) => {
         }
 
         recordRequest(oaiPayload.model, latency, true, endpoint);
-        const anthropicResp = openAIToAnthropic(oaiResp, requestModel);
+        const anthropicResp = openAIToAnthropic(oaiResp, requestModel, oaiPayload.model);
         const outPreview = blocksToText(anthropicResp.content);
         liveFinish(reqId, true, latency, outPreview);
         log('RES', `${C.green}✓${C.reset} ${latency}ms | ${anthropicResp.usage.input_tokens}in/${anthropicResp.usage.output_tokens}out`);
@@ -1208,7 +1213,9 @@ const server = http.createServer(async (req, res) => {
         id: streamMsgId,
         type: 'message',
         role: 'assistant',
-        model: requestModel || 'glm-5.2',
+        // Echo the actual model the proxy routed to (the mapped upstream slug),
+        // not the inbound Anthropic-style name the client sent.
+        model: oaiPayload.model || requestModel || 'glm-5.2',
         content: [],
         stop_reason: null,
         stop_sequence: null,
