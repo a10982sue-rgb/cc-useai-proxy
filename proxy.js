@@ -64,9 +64,21 @@ const HOST       = process.env.HOST || '0.0.0.0';
 let UPSTREAM_PRIMARY  = process.env.USEAI_BASE_URL || 'https://api.iamhc.cn';
 let UPSTREAM_FALLBACK = process.env.USEAI_FALLBACK_URL || 'https://api.hcnsec.cn';
 const UPSTREAM_PATH     = '/v1/chat/completions';
-// Upstream API key — set via USEAI_API_KEY env (Render dashboard) or the
-// /admin panel. Never baked into source; banner warns if unset.
+// Upstream API key — primary single key (USEAI_API_KEY env or /admin). When
+// the key pool below is non-empty, the pool is used instead with automatic
+// failover on bad keys (401/403/quota-exhausted). See rotateKey()/pickKey().
 let API_KEY           = process.env.USEAI_API_KEY || '';
+// Key pool — admin-managed bulk list of upstream keys. On each request the
+// proxy picks a healthy key; if the upstream rejects it (401/403/quota), the
+// key is marked bad and the next one is tried. Bad keys are cooled down and
+// re-tested later so a quota refill or rotation re-activates them.
+let API_KEYS = (() => {
+  const env = process.env.USEAI_API_KEYS || '';
+  if (!env.trim()) return [];
+  return env.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+})();
+const KEY_COOLDOWN_MS = 5 * 60 * 1000;   // re-test a bad key after 5 min
+const keyHealth = new Map();              // key -> { badAt?: number, fails: number }
 
 // Model mapping — all route to glm-5.2 (mutable via /admin)
 let DEFAULT_MODEL = process.env.USEAI_MODEL      || 'glm-5.2';
@@ -101,7 +113,7 @@ let INJECTION = process.env.INJECTION ||
 // with no file, env defaults apply. Admin-set values win over env.
 const CONFIG_FILE = (() => { try { return require('path').join(__dirname, 'config.local.json'); } catch { return 'config.local.json'; } })();
 function currentConfig() {
-  return { apiKey: API_KEY, primary: UPSTREAM_PRIMARY, fallback: UPSTREAM_FALLBACK,
+  return { apiKey: API_KEY, apiKeys: API_KEYS.slice(), primary: UPSTREAM_PRIMARY, fallback: UPSTREAM_FALLBACK,
            defaultModel: DEFAULT_MODEL, bigModel: BIG_MODEL, smallModel: SMALL_MODEL,
            glmModel: GLM_MODEL, proxyKey: PROXY_KEY, adminKey: ADMIN_KEY, injection: INJECTION };
 }
@@ -109,6 +121,7 @@ function loadRuntimeConfig() {
   try {
     const c = JSON.parse(require('fs').readFileSync(CONFIG_FILE, 'utf8'));
     if (typeof c.apiKey === 'string') API_KEY = c.apiKey;
+    if (Array.isArray(c.apiKeys)) API_KEYS = c.apiKeys.filter(k => typeof k === 'string' && k.trim());
     if (typeof c.primary === 'string') UPSTREAM_PRIMARY = c.primary;
     if (typeof c.fallback === 'string') UPSTREAM_FALLBACK = c.fallback;
     if (typeof c.defaultModel === 'string') DEFAULT_MODEL = c.defaultModel;
@@ -516,36 +529,102 @@ function upstreamFetch(url, options) {
   });
 }
 
+// ─── Key pool selection ───
+// When the pool is non-empty, prefer keys not currently cooling down. A bad
+// key (badAt set) becomes eligible again after KEY_COOLDOWN_MS so quota
+// refills / rotations re-activate it. Round-robin among healthy keys.
+let _keyIdx = 0;
+function healthyKeys() {
+  const now = Date.now();
+  return API_KEYS.filter(k => {
+    const h = keyHealth.get(k);
+    if (!h || !h.badAt) return true;
+    if (now - h.badAt >= KEY_COOLDOWN_MS) { h.badAt = 0; return true; } // re-test
+    return false;
+  });
+}
+function pickKey() {
+  if (API_KEYS.length === 0) return API_KEY || '';
+  const pool = healthyKeys();
+  const use = pool.length ? pool : API_KEYS; // if all cooling down, try anyway
+  const k = use[_keyIdx % use.length];
+  _keyIdx++;
+  return k;
+}
+function markKeyBad(key, status) {
+  if (!key) return;
+  const h = keyHealth.get(key) || { fails: 0, badAt: 0 };
+  h.fails = (h.fails || 0) + 1;
+  h.badAt = Date.now();
+  h.lastStatus = status;
+  keyHealth.set(key, h);
+}
+function markKeyGood(key) {
+  if (!key) return;
+  const h = keyHealth.get(key);
+  if (h) { h.badAt = 0; h.fails = 0; }
+}
+function isBadKeyStatus(status, errBody) {
+  // 401/403 = bad/expired key; 429 + quota markers = exhausted balance.
+  if (status === 401 || status === 403) return true;
+  if (status === 429) return true;
+  if (status === 400 && /insufficient_user_quota|额度不足|quota/i.test(errBody || '')) return true;
+  return false;
+}
+
+// fetchUpstream: tries each endpoint, and across the key pool when one is set.
+// A key that returns a bad-key status is marked, cooled down, and retried
+// with the next healthy key before giving up.
 async function fetchUpstream(payload, stream) {
   const body = JSON.stringify(payload);
   const endpoints = [UPSTREAM_PRIMARY, UPSTREAM_FALLBACK];
 
-  for (const base of endpoints) {
-    const url = base.replace(/\/+$/, '') + UPSTREAM_PATH;
-    try {
-      const res = await upstreamFetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': stream ? 'text/event-stream' : 'application/json',
-          'Authorization': `Bearer ${API_KEY}`,
-        },
-        body,
-      });
+  // Build the ordered list of keys to attempt this request.
+  let keyAttempts;
+  if (API_KEYS.length > 0) {
+    keyAttempts = healthyKeys();
+    if (keyAttempts.length === 0) keyAttempts = API_KEYS.slice(); // all cooling down → try anyway
+    // Cap attempts so a giant pool can't loop forever.
+    keyAttempts = keyAttempts.slice(0, 8);
+  } else {
+    keyAttempts = [API_KEY || ''];
+  }
 
-      if (res.statusCode >= 200 && res.statusCode < 300) {
-        return { res, endpoint: base };
+  for (const key of keyAttempts) {
+    for (const base of endpoints) {
+      const url = base.replace(/\/+$/, '') + UPSTREAM_PATH;
+      try {
+        const res = await upstreamFetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': stream ? 'text/event-stream' : 'application/json',
+            'Authorization': `Bearer ${key}`,
+          },
+          body,
+        });
+
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          markKeyGood(key);
+          return { res, endpoint: base, key };
+        }
+
+        // Read error body to classify.
+        const errBody = await new Promise((r) => {
+          const ch = []; res.on('data', c => ch.push(c)); res.on('end', () => r(Buffer.concat(ch).toString()));
+        });
+        if (isBadKeyStatus(res.statusCode, errBody)) {
+          markKeyBad(key, res.statusCode);
+          log('KEYPOOL', `key ${key.slice(0, 6)}…${key.slice(-4)} marked bad (${res.statusCode}); trying next`);
+          break; // → next key in keyAttempts
+        }
+        log('FAILOVER', `${base} returned ${res.statusCode}: ${errBody.slice(0, 200)}`);
+        recordError(`${base} => ${res.statusCode}`);
+        // Non-key error (5xx/4xx): try the other endpoint, same key.
+      } catch (err) {
+        log('FAILOVER', `${base} connection error: ${err.message}`);
+        recordError(`${base} => ${err.message}`);
       }
-
-      // Read error body and try next
-      const errBody = await new Promise((r) => {
-        const ch = []; res.on('data', c => ch.push(c)); res.on('end', () => r(Buffer.concat(ch).toString()));
-      });
-      log('FAILOVER', `${base} returned ${res.statusCode}: ${errBody.slice(0, 200)}`);
-      recordError(`${base} => ${res.statusCode}`);
-    } catch (err) {
-      log('FAILOVER', `${base} connection error: ${err.message}`);
-      recordError(`${base} => ${err.message}`);
     }
   }
   return null;
@@ -726,6 +805,20 @@ const ADMIN_PAGE = `<!DOCTYPE html>
   </div>
 
   <div class="card">
+    <h2>API key pool <span id="kp-count" class="gate off">0</span></h2>
+    <div class="hint">Bulk-upload many keys; if one goes bad (401/403/quota) the proxy auto-fails over to the next and cools the bad one down for 5 min before retrying. One key per line.</div>
+    <textarea id="kp-text" rows="4" style="width:100%;background:#08080c;border:1px solid #2d3441;border-radius:8px;padding:10px 12px;color:#e8e8ef;font:13px ui-monospace,monospace;outline:none;resize:vertical" placeholder="sk-aaa&#10;sk-bbb&#10;sk-ccc"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="ghost" id="btn-kp-add">Append</button>
+      <button class="ghost" id="btn-kp-replace">Replace all</button>
+      <button class="ghost" id="btn-kp-clear">Clear pool</button>
+      <button id="btn-kp-test">Test all</button>
+    </div>
+    <div class="msg" id="kp-msg"></div>
+    <div id="kp-list" style="font:11px ui-monospace,monospace;color:#a29bfe;margin-top:8px;max-height:160px;overflow:auto"></div>
+  </div>
+
+  <div class="card">
     <h2>Models</h2>
     <label>DEFAULT (sonnet)</label><input id="v-default" placeholder="glm-5.2">
     <label>BIG (opus)</label><input id="v-big" placeholder="glm-5.2">
@@ -811,6 +904,15 @@ const ADMIN_PAGE = `<!DOCTYPE html>
     $('v-default').value=c.defaultModel; $('v-big').value=c.bigModel;
     $('v-small').value=c.smallModel; $('v-glm').value=c.glmModel;
     $('v-api').value=''; $('v-proxy').value=''; $('v-admin').value='';
+    // key pool render
+    var kp=c.apiKeys||[];
+    $('kp-count').className='gate '+(kp.length?'on':'off');
+    $('kp-count').textContent=kp.length+' key'+(kp.length===1?'':'s');
+    $('kp-list').innerHTML=kp.length?kp.map(function(k){
+      var cls=k.bad?'color:#f87171':'color:#4ade80';
+      var tag=k.bad?' (bad'+(k.lastStatus?(' '+k.lastStatus):'')+(k.fails?(', '+k.fails+'x'):'')+')':' (ok)';
+      return '<div style="padding:2px 0;'+cls+'">'+k.masked+tag+'</div>';
+    }).join(''):'<div style="color:#55556a">pool empty — using single API KEY</div>';
     // injection: populate field but don't overwrite if the user is mid-edit
     var inj=$('v-injection');
     if(!inj.dataset.touched) inj.value=c.injection||'';
@@ -824,6 +926,31 @@ const ADMIN_PAGE = `<!DOCTYPE html>
   });
 
   $('v-injection').addEventListener('input',function(){ this.dataset.touched='1'; });
+
+  // ─── Key pool ───
+  function kpMsg(cls,txt){ $('kp-msg').className='msg '+cls; $('kp-msg').textContent=txt; }
+  function kpSend(replace){
+    var txt=$('kp-text').value;
+    if(!txt.trim()){ kpMsg('bad','paste keys first'); return; }
+    kpMsg('dim','importing…');
+    fetch('/admin/api/keys',{method:'POST',headers:hdr(),body:JSON.stringify({keys:txt,replace:!!replace})}).then(function(r){return r.json()}).then(function(j){
+      if(j.ok){ kpMsg('ok','imported '+j.added+' → pool '+j.pool); $('kp-text').value=''; refresh(); }
+      else kpMsg('bad','failed');
+    }).catch(function(e){ kpMsg('bad',''+e); });
+  }
+  $('btn-kp-add').onclick=function(){ kpSend(false); };
+  $('btn-kp-replace').onclick=function(){ kpSend(true); };
+  $('btn-kp-clear').onclick=function(){
+    fetch('/admin/api/config',{method:'POST',headers:hdr(),body:JSON.stringify({config:{apiKeys:[]}})}).then(function(r){return r.json()}).then(function(){ kpMsg('ok','pool cleared'); refresh(); });
+  };
+  $('btn-kp-test').onclick=function(){
+    kpMsg('dim','testing all keys…');
+    fetch('/admin/api/keys/test',{method:'POST',headers:hdr(),body:'{}'}).then(function(r){return r.json()}).then(function(j){
+      var ok=(j.results||[]).filter(function(x){return x.ok}).length;
+      kpMsg(ok===j.results.length?'ok':'bad',ok+'/'+j.results.length+' healthy');
+      refresh();
+    }).catch(function(e){ kpMsg('bad',''+e); });
+  };
 
   $('btn-save').onclick=function(){
     var cfg={};
@@ -957,6 +1084,7 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         config: {
           apiKeyMasked: mask(c.apiKey),
+          apiKeys: c.apiKeys.map(k => ({ masked: mask(k), bad: !!(keyHealth.get(k) && keyHealth.get(k).badAt), fails: (keyHealth.get(k)||{}).fails||0, lastStatus: (keyHealth.get(k)||{}).lastStatus })),
           primary: c.primary, fallback: c.fallback,
           defaultModel: c.defaultModel, bigModel: c.bigModel,
           smallModel: c.smallModel, glmModel: c.glmModel,
@@ -981,6 +1109,7 @@ const server = http.createServer(async (req, res) => {
     if (route === 'config' && method === 'POST') {
       const patch = bodyObj.config || {};
       if (typeof patch.apiKey === 'string' && patch.apiKey.trim()) API_KEY = patch.apiKey.trim();
+      if (Array.isArray(patch.apiKeys)) API_KEYS = patch.apiKeys.map(s => String(s).trim()).filter(Boolean); // [] clears the pool
       if (typeof patch.primary === 'string' && patch.primary.trim()) UPSTREAM_PRIMARY = patch.primary.trim();
       if (typeof patch.fallback === 'string' && patch.fallback.trim()) UPSTREAM_FALLBACK = patch.fallback.trim();
       if (typeof patch.defaultModel === 'string' && patch.defaultModel.trim()) DEFAULT_MODEL = patch.defaultModel.trim();
@@ -991,9 +1120,47 @@ const server = http.createServer(async (req, res) => {
       if (typeof patch.adminKey === 'string' && patch.adminKey.trim()) ADMIN_KEY = patch.adminKey.trim();
       if (typeof patch.injection === 'string') INJECTION = patch.injection; // '' clears it
       const saved = saveRuntimeConfig(currentConfig());
-      log('ADMIN', 'config updated (persisted=' + saved + ')');
+      log('ADMIN', 'config updated (persisted=' + saved + ', keys=' + API_KEYS.length + ')');
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, persisted: saved, gateActive: !!PROXY_KEY, injectionActive: !!INJECTION.trim() }));
+      res.end(JSON.stringify({ ok: true, persisted: saved, gateActive: !!PROXY_KEY, injectionActive: !!INJECTION.trim(), keyCount: API_KEYS.length }));
+      return;
+    }
+
+    // POST keys — bulk import keys (newline/comma/space separated), appended
+    // to the pool (deduped). Use { replace: true } to overwrite.
+    if (route === 'keys' && method === 'POST') {
+      const text = String(bodyObj.keys || '');
+      const incoming = text.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+      const replace = !!bodyObj.replace;
+      const set = new Set(replace ? [] : API_KEYS);
+      for (const k of incoming) set.add(k);
+      API_KEYS = Array.from(set);
+      // prune health map of removed keys
+      for (const k of keyHealth.keys()) if (!API_KEYS.includes(k)) keyHealth.delete(k);
+      const saved = saveRuntimeConfig(currentConfig());
+      log('ADMIN', 'keys imported: +' + incoming.length + ' (pool=' + API_KEYS.length + ')');
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, added: incoming.length, pool: API_KEYS.length, persisted: saved }));
+      return;
+    }
+
+    // POST keys/test-all — probe every key in the pool, return per-key health.
+    if (route === 'keys/test' && method === 'POST') {
+      const results = [];
+      for (const k of API_KEYS) {
+        try {
+          const r = await upstreamFetch(UPSTREAM_PRIMARY.replace(/\/+$/, '') + UPSTREAM_PATH, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${k}` },
+            body: JSON.stringify({ model: DEFAULT_MODEL, messages: [{ role: 'user', content: 'ping' }], max_tokens: 4, stream: false }),
+          });
+          const eb = await new Promise(rr => { const ch=[]; r.on('data',c=>ch.push(c)); r.on('end',()=>rr(Buffer.concat(ch).toString())); });
+          if (r.statusCode >= 200 && r.statusCode < 300) { markKeyGood(k); results.push({ masked: mask(k), ok: true, status: r.statusCode }); }
+          else { if (isBadKeyStatus(r.statusCode, eb)) markKeyBad(k, r.statusCode); results.push({ masked: mask(k), ok: false, status: r.statusCode, body: eb.slice(0,160) }); }
+        } catch (e) { results.push({ masked: mask(k), ok: false, error: e.message }); }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, results }));
       return;
     }
 
