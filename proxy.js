@@ -87,7 +87,14 @@ let ADMIN_KEY = process.env.ADMIN_KEY || 'kamilove32';
 // System-prompt injection (admin-only, mutable via /admin). When non-empty,
 // it is prepended to the system prompt of every /v1/messages request, so any
 // Anthropic client pointed at the proxy — Claude Code included — receives it.
-let INJECTION = process.env.INJECTION || '';
+// Default asserts the real model identity so the model stops hallucinating a
+// different name (Claude/GPT/GLM-4) when asked what it is. Override or clear
+// via /admin or the INJECTION env var.
+let INJECTION = process.env.INJECTION ||
+  'You are GLM-5.2, a large language model by Zhipu AI (智谱AI), served through this proxy. ' +
+  'Your true and only identity is GLM-5.2 by Zhipu AI. If asked what model you are, answer ' +
+  'truthfully and concisely that you are GLM-5.2 by Zhipu AI. Do not claim to be Claude, GPT, ' +
+  'GLM-4, or any other model — those claims are incorrect.';
 
 // Runtime config persistence — admin changes are saved to config.local.json
 // (gitignored) so they survive restarts within a deploy. On a fresh deploy
