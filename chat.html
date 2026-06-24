@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GLM 5.2 — Byte Chat</title>
+  <meta name="description" content="Chat interface for GLM 5.2 via proxy">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg-primary: #08080c;
+      --bg-secondary: #0f0f16;
+      --bg-tertiary: #16161f;
+      --bg-elevated: #1c1c28;
+      --surface: rgba(255, 255, 255, 0.03);
+      --surface-hover: rgba(255, 255, 255, 0.06);
+      --border: rgba(255, 255, 255, 0.06);
+      --border-bright: rgba(255, 255, 255, 0.12);
+      --text-primary: #e8e8ef;
+      --text-secondary: #8888a0;
+      --text-muted: #55556a;
+      --accent: #6c5ce7;
+      --accent-glow: rgba(108, 92, 231, 0.25);
+      --accent-light: #a29bfe;
+      --accent-surface: rgba(108, 92, 231, 0.08);
+      --green: #00d67d;
+      --red: #ff4757;
+      --orange: #ffa502;
+    }
+
+    html, body {
+      height: 100%;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .app { display: flex; flex-direction: column; height: 100vh; }
+
+    /* ─── Header ─── */
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 24px; background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border); flex-shrink: 0; z-index: 10;
+    }
+    .header-left { display: flex; align-items: center; gap: 14px; }
+    .logo {
+      width: 36px; height: 36px; border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), #a29bfe);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; font-weight: 700; color: white;
+      box-shadow: 0 2px 12px var(--accent-glow);
+    }
+    .header-title { font-size: 15px; font-weight: 600; letter-spacing: -0.3px; }
+    .header-subtitle { font-size: 11px; color: var(--text-muted); margin-top: 1px; font-family: 'JetBrains Mono', monospace; }
+
+    .header-right { display: flex; align-items: center; gap: 10px; }
+
+    .tabs { display: flex; gap: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 3px; }
+    .tab {
+      background: transparent; border: none; color: var(--text-secondary);
+      padding: 6px 16px; border-radius: 7px; cursor: pointer;
+      font-size: 12.5px; font-weight: 600; font-family: 'Inter', sans-serif;
+      transition: all 0.2s;
+    }
+    .tab:hover { color: var(--text-primary); }
+    .tab.active { background: var(--accent); color: white; box-shadow: 0 2px 8px var(--accent-glow); }
+
+    .status-badge {
+      display: flex; align-items: center; gap: 6px;
+      padding: 5px 12px; border-radius: 20px;
+      background: var(--surface); border: 1px solid var(--border);
+      font-size: 11px; color: var(--text-secondary);
+      font-family: 'JetBrains Mono', monospace; transition: all 0.3s;
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); transition: background 0.3s; }
+    .status-badge.online .status-dot { background: var(--green); box-shadow: 0 0 8px rgba(0,214,125,0.5); animation: pulse-dot 2s ease-in-out infinite; }
+    .status-badge.error .status-dot { background: var(--red); }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+    .btn-clear {
+      background: var(--surface); border: 1px solid var(--border); color: var(--text-secondary);
+      padding: 7px 14px; border-radius: 8px; cursor: pointer;
+      font-size: 12px; font-family: 'Inter', sans-serif; transition: all 0.2s;
+    }
+    .btn-clear:hover { background: var(--surface-hover); color: var(--text-primary); border-color: var(--border-bright); }
+
+    /* ─── Views ─── */
+    .view { flex: 1; display: none; flex-direction: column; min-height: 0; }
+    .view.active { display: flex; }
+
+    /* ─── Chat ─── */
+    .chat-container { flex: 1; overflow-y: auto; padding: 24px; scroll-behavior: smooth; }
+    .chat-container::-webkit-scrollbar { width: 5px; }
+    .chat-container::-webkit-scrollbar-track { background: transparent; }
+    .chat-container::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 10px; }
+
+    .messages { max-width: 800px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+
+    .welcome { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 80px 20px; text-align: center; animation: fadeIn 0.6s ease; }
+    .welcome-icon { width: 64px; height: 64px; border-radius: 18px; background: linear-gradient(135deg, var(--accent), #a29bfe, #fd79a8); display: flex; align-items: center; justify-content: center; font-size: 28px; margin-bottom: 20px; box-shadow: 0 8px 32px var(--accent-glow); }
+    .welcome h2 { font-size: 22px; font-weight: 600; margin-bottom: 8px; background: linear-gradient(135deg, var(--text-primary), var(--accent-light)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .welcome p { color: var(--text-muted); font-size: 14px; max-width: 400px; line-height: 1.6; }
+
+    .msg { display: flex; gap: 12px; padding: 16px; border-radius: 14px; animation: slideIn 0.3s ease; line-height: 1.65; font-size: 14px; }
+    .msg.user { background: var(--accent-surface); border: 1px solid rgba(108,92,231,0.12); }
+    .msg.assistant { background: var(--surface); border: 1px solid var(--border); }
+    .msg.error { background: rgba(255,71,87,0.06); border: 1px solid rgba(255,71,87,0.15); color: var(--red); }
+
+    .msg-avatar { width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; flex-shrink: 0; font-weight: 600; }
+    .msg.user .msg-avatar { background: linear-gradient(135deg, var(--accent), #a29bfe); color: white; }
+    .msg.assistant .msg-avatar { background: var(--bg-elevated); color: var(--accent-light); border: 1px solid var(--border); }
+
+    .msg-body { flex: 1; min-width: 0; overflow-wrap: break-word; }
+    .msg-body pre { background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin: 10px 0; overflow-x: auto; font-family: 'JetBrains Mono', monospace; font-size: 12.5px; line-height: 1.6; }
+    .msg-body code { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; background: var(--bg-primary); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border); }
+    .msg-body pre code { background: none; border: none; padding: 0; }
+    .msg-body p { margin-bottom: 8px; } .msg-body p:last-child { margin-bottom: 0; }
+    .msg-body ul, .msg-body ol { padding-left: 20px; margin: 8px 0; } .msg-body li { margin: 4px 0; }
+    .msg-body strong { font-weight: 600; }
+    .msg-body h1, .msg-body h2, .msg-body h3 { margin: 14px 0 8px; font-weight: 600; }
+
+    .thinking { color: var(--text-muted); font-style: italic; font-size: 12px; padding: 4px 0; }
+    .thinking::before { content: '💭 '; }
+
+    .typing { display: inline-flex; gap: 4px; padding: 4px 0; }
+    .typing span { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-light); animation: bounce 1.4s infinite ease-in-out; }
+    .typing span:nth-child(2) { animation-delay: 0.2s; } .typing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes bounce { 0%,80%,100%{transform:scale(0);opacity:.3} 40%{transform:scale(1);opacity:1} }
+    @keyframes slideIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+    @keyframes fadeIn { from{opacity:0} to{opacity:1} }
+
+    .input-area { padding: 16px 24px 20px; background: var(--bg-secondary); border-top: 1px solid var(--border); flex-shrink: 0; }
+    .input-wrapper { max-width: 800px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end; }
+    .input-box { flex: 1; position: relative; }
+    #chat-input {
+      width: 100%; background: var(--bg-tertiary); border: 1px solid var(--border);
+      border-radius: 12px; padding: 14px 16px; color: var(--text-primary);
+      font-size: 14px; font-family: 'Inter', sans-serif; resize: none; outline: none;
+      min-height: 48px; max-height: 200px; line-height: 1.5;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    #chat-input::placeholder { color: var(--text-muted); }
+    #chat-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+
+    .btn-send {
+      width: 48px; height: 48px; border-radius: 12px; border: none;
+      background: linear-gradient(135deg, var(--accent), #a29bfe); color: white;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      font-size: 18px; transition: all 0.2s; flex-shrink: 0; box-shadow: 0 2px 12px var(--accent-glow);
+    }
+    .btn-send:hover { transform: translateY(-1px); box-shadow: 0 4px 20px var(--accent-glow); }
+    .btn-send:active { transform: scale(0.95); }
+    .btn-send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
+    .input-hint { text-align: center; margin-top: 8px; font-size: 11px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+
+    /* ─── Base URL view ─── */
+    .config-scroll { flex: 1; overflow-y: auto; padding: 32px 24px; }
+    .config-scroll::-webkit-scrollbar { width: 5px; }
+    .config-scroll::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 10px; }
+    .config-panel { max-width: 720px; margin: 0 auto; }
+    .config-panel h2 { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+    .config-panel .lead { color: var(--text-muted); font-size: 13px; margin-bottom: 28px; line-height: 1.6; }
+    .field { margin-bottom: 20px; }
+    .field label { display: block; font-size: 11px; color: var(--text-muted); margin-bottom: 6px; font-family: 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: 0.05em; }
+    .field .desc { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+    .copyrow { display: flex; gap: 8px; }
+    .copyrow input {
+      flex: 1; background: var(--bg-tertiary); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 12px; color: var(--text-primary);
+      font-size: 12.5px; font-family: 'JetBrains Mono', monospace; outline: none; min-width: 0;
+    }
+    .copyrow input[readonly] { color: var(--accent-light); }
+    .copyrow input.locked { color: var(--green); }
+    .btn-copy {
+      background: var(--surface); border: 1px solid var(--border-bright); color: var(--text-secondary);
+      padding: 0 14px; border-radius: 8px; cursor: pointer; font-size: 12px;
+      font-family: 'Inter', sans-serif; transition: all 0.2s; flex-shrink: 0;
+    }
+    .btn-copy:hover { color: var(--text-primary); border-color: var(--accent-light); }
+    .btn-copy.ok { background: var(--green); color: #04140a; border-color: var(--green); }
+    .snippet-wrap { position: relative; }
+    .snippet-wrap .btn-copy { position: absolute; top: 8px; right: 8px; }
+    pre.snippet {
+      background: var(--bg-primary); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px; overflow-x: auto; font-family: 'JetBrains Mono', monospace;
+      font-size: 12px; color: var(--text-primary); line-height: 1.6;
+    }
+    .pillrow { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 24px; }
+    .pill { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
+    .pill b { color: var(--text-primary); }
+    .test-row { display: flex; align-items: center; gap: 12px; }
+    .btn-test { background: linear-gradient(135deg, var(--accent), #a29bfe); border: none; color: white; padding: 9px 18px; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 600; font-family: 'Inter', sans-serif; }
+    .test-out { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+    .test-out.ok { color: var(--green); } .test-out.bad { color: var(--red); }
+
+    @media (max-width: 640px) {
+      .header { padding: 12px 16px; flex-wrap: wrap; gap: 8px; }
+      .chat-container { padding: 16px; } .input-area { padding: 12px 16px 16px; }
+      .header-subtitle { display: none; }
+      .tabs .tab { padding: 6px 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="header-left">
+        <div class="logo">G</div>
+        <div>
+          <div class="header-title">GLM 5.2</div>
+          <div class="header-subtitle" id="hd-sub">via proxy · localhost:8787</div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="status-badge" id="status-badge">
+          <div class="status-dot"></div>
+          <span id="status-text">checking...</span>
+        </div>
+        <div class="tabs">
+          <button class="tab active" data-tab="chat">Chat</button>
+          <button class="tab" data-tab="baseurl">Base URL</button>
+        </div>
+        <button class="btn-clear" id="btn-clear" title="Clear chat">Clear</button>
+      </div>
+    </header>
+
+    <!-- CHAT VIEW -->
+    <div class="view active" id="view-chat">
+      <div class="chat-container" id="chat-container">
+        <div class="messages" id="messages">
+          <div class="welcome" id="welcome">
+            <div class="welcome-icon">✦</div>
+            <h2>GLM 5.2 Chat</h2>
+            <p>Connected through your proxy. Model is locked to <b>glm-5.2</b>, key <b>broskillable</b>.</p>
+          </div>
+        </div>
+      </div>
+      <div class="input-area">
+        <div class="input-wrapper">
+          <div class="input-box">
+            <textarea id="chat-input" placeholder="Message GLM 5.2..." rows="1"></textarea>
+          </div>
+          <button class="btn-send" id="btn-send" title="Send">↑</button>
+        </div>
+        <div class="input-hint">Enter to send · Shift+Enter for newline</div>
+      </div>
+    </div>
+
+    <!-- BASE URL VIEW -->
+    <div class="view" id="view-baseurl">
+      <div class="config-scroll">
+        <div class="config-panel">
+          <h2>Proxy connection</h2>
+          <p class="lead">Point any Anthropic-compatible client at this proxy. The model is pinned to <b>glm-5.2</b>; the API key is <b>broskillable</b>.</p>
+
+          <div class="field">
+            <label>Base URL (ANTHROPIC_BASE_URL)</label>
+            <div class="desc">Root of the proxy. Browse here to open this page.</div>
+            <div class="copyrow"><input type="text" id="cfg-base" readonly><button class="btn-copy" data-target="cfg-base">Copy</button></div>
+          </div>
+
+          <div class="field">
+            <label>API Key (ANTHROPIC_API_KEY)</label>
+            <div class="desc">Hard-coded for this site.</div>
+            <div class="copyrow"><input type="text" id="cfg-key" class="locked" readonly value="broskillable"><button class="btn-copy" data-target="cfg-key">Copy</button></div>
+          </div>
+
+          <div class="field">
+            <label>Messages endpoint</label>
+            <div class="copyrow"><input type="text" id="cfg-ep" readonly><button class="btn-copy" data-target="cfg-ep">Copy</button></div>
+          </div>
+
+          <div class="field">
+            <label>Model</label>
+            <div class="copyrow"><input type="text" id="cfg-model" class="locked" readonly value="glm-5.2"><button class="btn-copy" data-target="cfg-model">Copy</button></div>
+          </div>
+
+          <div class="field">
+            <label>Claude Code — cmd / batch</label>
+            <div class="snippet-wrap">
+              <pre class="snippet" id="sn-cmd"></pre>
+              <button class="btn-copy" data-target="sn-cmd">Copy</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Claude Code — PowerShell</label>
+            <div class="snippet-wrap">
+              <pre class="snippet" id="sn-ps"></pre>
+              <button class="btn-copy" data-target="sn-ps">Copy</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Connection check</label>
+            <div class="test-row">
+              <button class="btn-test" id="btn-test">Test /health</button>
+              <span class="test-out" id="test-out">Not tested yet.</span>
+            </div>
+          </div>
+
+          <div class="pillrow">
+            <span class="pill"><b>Upstream</b> api.iamhc.cn → api.hcnsec.cn</span>
+            <span class="pill"><b>Port</b> 8787</span>
+            <span class="pill"><b>Streaming</b> SSE</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      'use strict';
+
+      // ─── Config ───
+      // Served by the proxy → location.origin is http://localhost:8787 (or the Render URL).
+      // Opened as file:// → fall back to localhost.
+      const ORIGIN = (location.origin && location.origin.indexOf('http') === 0) ? location.origin : 'http://localhost:8787';
+      const cfg = {
+        base: localStorage.getItem('glm_base') || ORIGIN,
+        key: 'broskillable',
+        model: 'glm-5.2',
+      };
+
+      const $ = (s) => document.querySelector(s);
+      const messagesEl = $('#messages');
+      const chatContainer = $('#chat-container');
+      const input = $('#chat-input');
+      const btnSend = $('#btn-send');
+      const btnClear = $('#btn-clear');
+      const statusBadge = $('#status-badge');
+      const statusText = $('#status-text');
+      const welcome = $('#welcome');
+
+      // ─── Base URL tab fill ───
+      $('#cfg-base').value = cfg.base;
+      $('#cfg-ep').value = cfg.base + '/v1/messages';
+      $('#sn-cmd').textContent =
+        'set ANTHROPIC_BASE_URL=' + cfg.base + '\n' +
+        'set ANTHROPIC_API_KEY=' + cfg.key + '\n' +
+        'claude';
+      $('#sn-ps').textContent =
+        '$env:ANTHROPIC_BASE_URL = "' + cfg.base + '"\n' +
+        '$env:ANTHROPIC_API_KEY = "' + cfg.key + '"\n' +
+        'claude';
+      $('#hd-sub').textContent = 'via proxy · ' + cfg.base.replace(/^https?:\/\//, '');
+
+      // ─── Tabs ───
+      document.querySelectorAll('.tab').forEach(t => {
+        t.addEventListener('click', () => {
+          document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+          const name = t.getAttribute('data-tab');
+          $('#view-chat').classList.toggle('active', name === 'chat');
+          $('#view-baseurl').classList.toggle('active', name === 'baseurl');
+          if (name === 'chat') input.focus();
+        });
+      });
+
+      // ─── Copy buttons ───
+      document.querySelectorAll('.btn-copy[data-target]').forEach(b => {
+        b.addEventListener('click', () => {
+          const el = $(b.getAttribute('data-target'));
+          const val = el.value !== undefined ? el.value : el.textContent;
+          const done = () => { const o = b.textContent; b.textContent = 'Copied'; b.classList.add('ok'); setTimeout(() => { b.textContent = o; b.classList.remove('ok'); }, 1200); };
+          navigator.clipboard.writeText(val).then(done).catch(() => { el.select(); document.execCommand('copy'); done(); });
+        });
+      });
+
+      // ─── Connection test ───
+      $('#btn-test').addEventListener('click', async () => {
+        const out = $('#test-out');
+        out.className = 'test-out'; out.textContent = 'Probing ' + cfg.base + '/health …';
+        try {
+          const r = await fetch(cfg.base + '/health', { signal: AbortSignal.timeout(5000) });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const j = await r.json();
+          out.className = 'test-out ok';
+          out.textContent = 'OK · models: ' + JSON.stringify(j.models || j.default || {}).replace(/"/g,'') + ' · uptime ' + (j.uptime ?? '?') + 's';
+        } catch (e) {
+          out.className = 'test-out bad';
+          out.textContent = 'Failed: ' + (e && e.message ? e.message : e) + ' — is the proxy running?';
+        }
+      });
+
+      // ─── Health ───
+      async function checkHealth() {
+        try {
+          const r = await fetch(cfg.base + '/health', { signal: AbortSignal.timeout(5000) });
+          if (r.ok) { statusBadge.className = 'status-badge online'; statusText.textContent = 'online'; }
+          else throw new Error(r.status);
+        } catch { statusBadge.className = 'status-badge error'; statusText.textContent = 'offline'; }
+      }
+      checkHealth();
+      setInterval(checkHealth, 30000);
+
+      // ─── Clear ───
+      btnClear.addEventListener('click', () => {
+        history.length = 0;
+        messagesEl.innerHTML = '';
+        messagesEl.appendChild(welcome);
+        welcome.style.display = 'flex';
+      });
+
+      // ─── Input autosize ───
+      input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 200) + 'px'; });
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+      btnSend.addEventListener('click', send);
+
+      const history = [];
+      let busy = false, abortCtrl = null;
+
+      function setBusy(b) { busy = b; btnSend.disabled = b; input.disabled = b; if (!b) input.focus(); }
+      function scrollBottom() { chatContainer.scrollTop = chatContainer.scrollHeight; }
+
+      function addMsg(role) {
+        welcome.style.display = 'none';
+        const div = document.createElement('div');
+        div.className = 'msg ' + role;
+        const avatar = document.createElement('div'); avatar.className = 'msg-avatar'; avatar.textContent = role === 'user' ? 'Y' : 'G';
+        const body = document.createElement('div'); body.className = 'msg-body';
+        div.appendChild(avatar); div.appendChild(body);
+        messagesEl.appendChild(div); scrollBottom();
+        return body;
+      }
+
+      function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+      function renderMd(text) {
+        let html = text
+          .replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => `<pre><code>${escHtml(code.trim())}</code></pre>`)
+          .replace(/`([^`]+)`/g, '<code>$1</code>')
+          .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+          .replace(/\*(.+?)\*/g, '<em>$1</em>')
+          .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+          .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+          .replace(/^# (.+)$/gm, '<h1>$1</h1>');
+        html = html.split(/\n\n+/).map(block => {
+          if (block.startsWith('<h') || block.startsWith('<pre>')) return block;
+          return '<p>' + block.replace(/\n/g, '<br>') + '</p>';
+        }).join('');
+        return html;
+      }
+
+      // ─── Stream ───
+      async function send() {
+        const text = input.value.trim();
+        if (!text || busy) return;
+        input.value = ''; input.style.height = 'auto';
+        const userBody = addMsg('user'); userBody.innerHTML = renderMd(escHtml(text));
+        history.push({ role: 'user', content: text });
+        const aBody = addMsg('assistant');
+        aBody.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+        setBusy(true); abortCtrl = new AbortController();
+        try {
+          const res = await fetch(cfg.base + '/v1/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-api-key': cfg.key, 'anthropic-version': '2023-06-01' },
+            body: JSON.stringify({ model: cfg.model, max_tokens: 8192, stream: true, messages: history }),
+            signal: abortCtrl.signal,
+          });
+          if (!res.ok) { const eb = await res.text(); throw new Error('HTTP ' + res.status + ': ' + eb.slice(0, 300)); }
+          const reader = res.body.getReader(); const decoder = new TextDecoder();
+          let fullText = '', thinkingText = '', buf = '';
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split('\n'); buf = lines.pop();
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith('data:')) continue;
+              const data = trimmed.slice(5).trim();
+              if (data === '[DONE]') continue;
+              let evt; try { evt = JSON.parse(data); } catch { continue; }
+              if (evt.type === 'content_block_delta') {
+                const d = evt.delta;
+                if (d.type === 'text_delta' && d.text) {
+                  fullText += d.text; aBody.innerHTML = '';
+                  if (thinkingText) { const t = document.createElement('div'); t.className = 'thinking'; t.textContent = thinkingText; aBody.appendChild(t); }
+                  const c = document.createElement('div'); c.innerHTML = renderMd(fullText); aBody.appendChild(c); scrollBottom();
+                } else if (d.type === 'thinking_delta' && d.thinking) { thinkingText += d.thinking; }
+              }
+            }
+          }
+          if (!fullText && !thinkingText) aBody.innerHTML = '<span style="color:var(--text-muted)">(empty response)</span>';
+          else if (!fullText && thinkingText) { aBody.innerHTML = ''; const t = document.createElement('div'); t.className = 'thinking'; t.textContent = thinkingText; aBody.appendChild(t); }
+          if (fullText) history.push({ role: 'assistant', content: fullText });
+        } catch (err) {
+          if (err.name === 'AbortError') aBody.innerHTML = '<span style="color:var(--text-muted)">(cancelled)</span>';
+          else { aBody.parentElement.className = 'msg error'; aBody.textContent = 'Error: ' + err.message; }
+        } finally { setBusy(false); abortCtrl = null; }
+      }
+
+      input.focus();
+    })();
+  </script>
+</body>
+</html>

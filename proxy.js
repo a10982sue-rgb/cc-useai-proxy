@@ -537,8 +537,32 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Headers', '*');
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
+  // ─── Web chat UI at the root — serve chat.html from disk if present
+  //     (nicer UI with Chat + Base URL tabs, model locked to glm-5.2),
+  //     else fall back to a minimal inline page. ───
+  if (method === 'GET' && (url === '/' || url === '/index.html' || url === '/chat.html')) {
+    let html = null;
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const p = path.join(__dirname, 'chat.html');
+      if (fs.existsSync(p)) html = fs.readFileSync(p);
+    } catch (e) { /* fall through to inline page */ }
+    if (!html) {
+      html = Buffer.from(
+        '<!DOCTYPE html><meta charset="utf-8"><title>cc-useai-proxy</title>' +
+        '<body style="font-family:sans-serif;background:#0d1117;color:#e6edf3;padding:40px">' +
+        '<h1>cc-useai-proxy v2.0</h1><p>chat.html not found. Health at <a href="/health">/health</a>.</p>',
+        'utf8'
+      );
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': html.length });
+    res.end(html);
+    return;
+  }
+
   // ─── Health ───
-  if (url === '/health' || url === '/') {
+  if (url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'ok',
