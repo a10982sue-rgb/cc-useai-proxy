@@ -99,14 +99,24 @@ let ADMIN_KEY = process.env.ADMIN_KEY || 'kamilove32';
 // System-prompt injection (admin-only, mutable via /admin). When non-empty,
 // it is prepended to the system prompt of every /v1/messages request, so any
 // Anthropic client pointed at the proxy — Claude Code included — receives it.
-// Default asserts the real model identity so the model stops hallucinating a
-// different name (Claude/GPT/GLM-4) when asked what it is. Override or clear
-// via /admin or the INJECTION env var.
-let INJECTION = process.env.INJECTION ||
+// The chat page exposes this as the "default system prompt" the user can edit
+// per-session; whatever they set is appended after the identity assertion.
+
+// IDENTITY_ASSERTION is the fixed, non-negotiable part: it makes the model
+// truthfully identify as GLM-5.2. It is ALWAYS prepended and cannot be
+// disabled by users or the admin (so the model never lies about its name
+// again). Override the text via INJECTION env if you must, but the default
+// stands.
+const IDENTITY_ASSERTION = process.env.IDENTITY_ASSERTION ||
   'You are GLM-5.2, a large language model by Zhipu AI (智谱AI), served through this proxy. ' +
   'Your true and only identity is GLM-5.2 by Zhipu AI. If asked what model you are, answer ' +
   'truthfully and concisely that you are GLM-5.2 by Zhipu AI. Do not claim to be Claude, GPT, ' +
   'GLM-4, or any other model — those claims are incorrect.';
+
+// INJECTION is the admin/user-customizable default system prompt layered on
+// top of the identity assertion. It is the "default system prompt" the chat
+// page loads and lets the user override per-session.
+let INJECTION = process.env.INJECTION || '';
 
 // Runtime config persistence — admin changes are saved to config.local.json
 // (gitignored) so they survive restarts within a deploy. On a fresh deploy
@@ -396,21 +406,31 @@ function parseToolCalls(text) {
 // ═══════════════════════════════════════════════════════════════════
 //  ANTHROPIC -> OPENAI MESSAGE TRANSLATION
 // ═══════════════════════════════════════════════════════════════════
-function anthropicToOpenAI(body) {
+function anthropicToOpenAI(body, fromChat) {
   const messages = [];
 
+  // ─── System prompt assembly ───
+  // Layering (the GLM-5.2 identity assertion is ALWAYS first, never removable):
+  //  • Chat-page requests (fromChat): the user's system-prompt field (body.system)
+  //    IS their session prompt — it starts as a copy of the admin default, so
+  //    we use it directly and do NOT also prepend the admin INJECTION (would
+  //    duplicate). Effective = IDENTITY + body.system.
+  //  • API-client requests (Claude Code, SDKs): effective = IDENTITY +
+  //    INJECTION(admin default) + body.system(their own, if any).
   let sysText = '';
+  if (IDENTITY_ASSERTION && IDENTITY_ASSERTION.trim()) {
+    sysText = IDENTITY_ASSERTION.trim();
+  }
+  if (!fromChat && INJECTION && INJECTION.trim()) {
+    sysText = sysText ? (sysText + '\n\n' + INJECTION.trim()) : INJECTION.trim();
+  }
   if (body.system) {
-    sysText = typeof body.system === 'string'
+    const clientSys = typeof body.system === 'string'
       ? body.system
       : blocksToText(body.system);
-  }
-
-  // ─── Admin system-prompt injection ───
-  // Prepended to every request's system prompt so any Anthropic client
-  // (Claude Code, SDKs, the web chat) receives it transparently.
-  if (INJECTION && INJECTION.trim()) {
-    sysText = sysText.trim() ? (INJECTION.trim() + '\n\n' + sysText) : INJECTION.trim();
+    if (clientSys && clientSys.trim()) {
+      sysText = sysText ? (sysText + '\n\n' + clientSys.trim()) : clientSys.trim();
+    }
   }
 
   const toolPrompt = buildToolPrompt(body.tools);
@@ -765,6 +785,10 @@ const ADMIN_PAGE = `<!DOCTYPE html>
   .stat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #1c1c28;font-size:13px}
   .stat:last-child{border:0}
   .stat b{color:#a29bfe;font-family:ui-monospace,monospace}
+  .sr-bar{height:8px;background:#1c1c28;border-radius:6px;overflow:hidden;margin-top:8px}
+  .sr-fill{height:100%;border-radius:6px;transition:width .4s ease,background .3s}
+  .sr-label{display:flex;justify-content:space-between;font-size:11px;color:#55556a;font-family:ui-monospace,monospace;margin-top:6px}
+  .sr-pct{font-size:15px;font-weight:600;font-family:ui-monospace,monospace}
   .gate{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;margin-left:8px}
   .gate.on{background:rgba(0,214,125,.12);color:#4ade80}.gate.off{background:rgba(248,113,113,.12);color:#f87171}
   #login{display:none}
@@ -790,6 +814,9 @@ const ADMIN_PAGE = `<!DOCTYPE html>
     <div class="stat"><span>Failed</span><b id="s-fail">—</b></div>
     <div class="stat"><span>Avg latency</span><b id="s-lat">—</b></div>
     <div class="stat"><span>Uptime</span><b id="s-up">—</b></div>
+    <label style="margin-top:14px;margin-bottom:0">SUCCESS RATE</label>
+    <div class="sr-bar"><div id="sr-fill" class="sr-fill" style="width:100%;background:#4ade80"></div></div>
+    <div class="sr-label"><span id="sr-detail">no requests yet</span><span class="sr-pct" id="sr-pct">100%</span></div>
   </div>
 
   <div class="card">
@@ -897,6 +924,14 @@ const ADMIN_PAGE = `<!DOCTYPE html>
     $('s-fail').textContent=s.failedRequests;
     $('s-lat').textContent=s.avgLatencyMs+'ms';
     $('s-up').textContent=fmt(s.uptime);
+    // Success-rate bar
+    var pct = (s.totalRequests > 0) ? s.successRate : 100;
+    var srFill=$('sr-fill'), srPct=$('sr-pct'), srDetail=$('sr-detail');
+    srPct.textContent = (s.totalRequests > 0 ? pct : '100') + '%';
+    srFill.style.width = Math.max(2, pct) + '%';
+    var color = '#4ade80'; if (s.totalRequests > 0) { if (pct < 80) color = '#f87171'; else if (pct < 95) color = '#ffa502'; }
+    srFill.style.background = color;
+    srDetail.textContent = s.totalRequests > 0 ? (s.successfulRequests + '/' + s.totalRequests + ' succeeded') : 'no requests yet';
     $('k-api').textContent='('+c.apiKeyMasked+')';
     $('k-proxy').textContent='('+c.proxyKeyMasked+')';
     $('k-admin').textContent='('+c.adminKeyMasked+')';
@@ -1060,6 +1095,22 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ─── Public defaults for the chat page (no secrets) ───
+  // Lets the web chat load the admin-set default system prompt + model label
+  // without exposing keys. The user can override the prompt per-session.
+  if (method === 'GET' && url === '/api/defaults') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      defaultSystemPrompt: INJECTION || '',
+      // The identity assertion (GLM-5.2) is always prepended server-side and
+      // cannot be turned off by the user; expose it so the UI can show it.
+      identityPrompt: IDENTITY_ASSERTION,
+      model: DEFAULT_MODEL,
+    }));
+    return;
+  }
+
   // ─── Admin API ───
   // Every /admin/api/* call requires the admin password (header x-admin-key
   // or body { password }). On mismatch → 401. Secrets never reach the page.
@@ -1097,6 +1148,9 @@ const server = http.createServer(async (req, res) => {
           totalRequests: metrics.totalRequests,
           successfulRequests: metrics.successfulRequests,
           failedRequests: metrics.failedRequests,
+          successRate: metrics.totalRequests > 0
+            ? Math.round((metrics.successfulRequests / metrics.totalRequests) * 1000) / 10
+            : 100,
           avgLatencyMs: Math.round(metrics.avgLatencyMs),
           uptime: Math.round((Date.now() - metrics.startTime) / 1000),
           recentErrors: metrics.errors.slice(-10),
@@ -1222,6 +1276,9 @@ const server = http.createServer(async (req, res) => {
 
   // ─── Health ───
   if (url === '/health') {
+    const sr = metrics.totalRequests > 0
+      ? Math.round((metrics.successfulRequests / metrics.totalRequests) * 1000) / 10
+      : 100;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'ok',
@@ -1236,6 +1293,15 @@ const server = http.createServer(async (req, res) => {
       endpoints: {
         primary: UPSTREAM_PRIMARY,
         fallback: UPSTREAM_FALLBACK,
+      },
+      // Public success metrics (not sensitive — just counts + a percentage).
+      // Lets the chat page show a live success-rate badge without admin auth.
+      stats: {
+        totalRequests: metrics.totalRequests,
+        successfulRequests: metrics.successfulRequests,
+        failedRequests: metrics.failedRequests,
+        successRate: sr,
+        avgLatencyMs: Math.round(metrics.avgLatencyMs),
       },
     }));
     return;
@@ -1300,7 +1366,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     const requestModel = body.model || '';
-    const oaiPayload = anthropicToOpenAI(body);
+    // The chat page tags its requests so we know to use the user's system
+    // prompt field directly (it already carries the admin default).
+    const fromChat = !!(body.metadata && body.metadata.source === 'bytechat');
+    const oaiPayload = anthropicToOpenAI(body, fromChat);
     const wantStream = !!body.stream;
 
     // Capture a short preview of the latest user turn for the admin log.
