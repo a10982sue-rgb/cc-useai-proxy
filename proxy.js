@@ -254,16 +254,24 @@ function mapModel(anthropicModel) {
   // GLM routing
   if (m.includes('glm'))    return GLM_MODEL;
 
-  // Claude family routing
+  // Claude family routing — ALL Claude names map to GLM-5.2 because that's the
+  // only upstream model this proxy serves. This is what makes "select glm-5.2 /
+  // sonnet / opus" in Claude Code "just work": whatever Claude Code sends, the
+  // proxy accepts it and routes to glm-5.2. Claude Code's model picker only
+  // knows Anthropic model IDs, so we accept them all and translate.
   if (m.includes('haiku'))  return SMALL_MODEL;
   if (m.includes('opus'))   return BIG_MODEL;
   if (m.includes('sonnet')) return DEFAULT_MODEL;
+  if (m.includes('claude')) return DEFAULT_MODEL;
 
   // GPT family passthrough
   if (m.includes('gpt'))    return m;
 
-  // Allow passing a real upstream slug straight through
-  return anthropicModel.replace(/\[.*?\]/g, '').trim() || DEFAULT_MODEL;
+  // Anything else (including unknown strings) → default GLM. We intentionally
+  // do NOT pass unknown model names straight to the upstream, because the
+  // upstream only serves glm-5.2 and would reject them with a 400 — which is
+  // the "you don't have access to that model" error users hit in Claude Code.
+  return DEFAULT_MODEL;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -491,7 +499,24 @@ function anthropicToOpenAI(body, fromChat) {
   if (Array.isArray(body.stop_sequences) && body.stop_sequences.length) {
     openai.stop = body.stop_sequences;
   }
-  if (typeof body.max_tokens === 'number') openai.max_tokens = body.max_tokens;
+  // ─── Maximize output budget ───
+  // GLM-5.2's context is ~256K in / ~16K+ out. Claude Code and most clients send
+  // a small max_tokens (often 1024–4096) which truncates any non-trivial answer
+  // (e.g. a full game file). Clamp the floor up so the model has room to finish,
+  // and never lower a client's explicit large request.
+  if (typeof body.max_tokens === 'number' && body.max_tokens > 0) {
+    openai.max_tokens = Math.max(body.max_tokens, 8192);
+  } else {
+    openai.max_tokens = 16384; // generous default when the client omits it
+  }
+  // ─── Disable CoT reasoning by default ───
+  // GLM-5.2 (Zhipu) emits a hidden `reasoning_content` field that eats the
+  // output token budget BEFORE visible `content` is produced. With default
+  // max_tokens the model spent its whole budget thinking and returned EMPTY
+  // visible text (finish=length, content_len=0) — which is exactly why "it
+  // can't make games": the code never came out. enable_thinking:false tells
+  // Zhipu to skip reasoning and emit the answer directly. This is the fix.
+  openai.enable_thinking = false;
   return openai;
 }
 
@@ -1325,13 +1350,24 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ─── Models endpoint ───
+  // Advertise every model name Claude Code's picker knows about, all mapped to
+  // glm-5.2 upstream. This is what stops the "you don't have access to glm-5.2 /
+  // model not available" error: the picker sees the IDs it recognizes, accepts
+  // the selection, and the proxy translates any of them to glm-5.2.
   if (url === '/v1/models') {
+    const now = Math.floor(Date.now() / 1000);
+    const ids = [
+      'glm-5.2',
+      'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6',
+      'claude-sonnet-4-6', 'claude-sonnet-4-5',
+      'claude-haiku-4-5',
+      'claude-3-7-sonnet-latest', 'claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest',
+      'opus', 'sonnet', 'haiku',
+    ];
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       object: 'list',
-      data: [
-        { id: 'glm-5.2', object: 'model', created: 1719000000, owned_by: 'zhipu' },
-      ],
+      data: ids.map(id => ({ id, object: 'model', created: now, owned_by: 'zhipu' })),
     }));
     return;
   }
